@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 
+	"github.com/Morpa/go-rag/chat"
 	"github.com/Morpa/go-rag/config"
 	"github.com/Morpa/go-rag/llm"
 )
