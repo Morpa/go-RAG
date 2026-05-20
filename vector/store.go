@@ -10,8 +10,8 @@ type Document struct {
 }
 
 type Result struct {
-	Document Document
-	Score    float32
+	Document
+	Score float32
 }
 
 type Store interface {
