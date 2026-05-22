@@ -3,6 +3,7 @@ module github.com/Morpa/go-rag
 go 1.26.3
 
 require (
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/joho/godotenv v1.5.1
 	github.com/openai/openai-go/v3 v3.36.0
@@ -20,5 +21,6 @@ require (
 	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/sync v0.19.0 // indirect
+	golang.org/x/sys v0.29.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 )
