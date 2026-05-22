@@ -1,7 +1,33 @@
+// A boundary-aware byte splitter used by the ingest pipeline.
 package ingest
 
 import "strings"
 
+// chunk splits text into overlapping windows of approximately
+// size bytes. When the window's right edge falls near a paragraph,
+// sentence, or word boundary, the cut is moved to that boundary so
+// chunks read more naturally and similarity search aligns with
+// human-meaningful units.
+//
+// Why boundary-aware chunking matters: an embedding is a single vector
+// summarizing the meaning of its input. If you slice in the middle of
+// a sentence, both halves get a degraded embedding — neither carries
+// the full thought. By preferring paragraph boundaries (then sentence,
+// then word) we keep ideas intact, which gives the retriever cleaner
+// signal to match against.
+//
+// More sophisticated splitters exist (token-aware, semantic
+// recursive-character, transformer-based), but this one works well
+// and is sufficient for our purposes.
+//
+// "Approximately" because boundary-seeking trims the tail of a window;
+// resulting chunks are typically 70–100% of size. Empty input
+// produces no chunks.
+//
+// Indexing is byte-based for simplicity; the boundary patterns
+// ("\n\n", ". ", " ") are ASCII, so cuts cannot land mid-rune unless
+// the text contains a long run of non-ASCII with no whitespace —
+// vanishingly rare for the course's source material.
 func chunk(text string, size, overlap int) []string {
 	text = strings.TrimSpace(text)
 	if text == "" {

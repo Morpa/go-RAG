@@ -43,18 +43,43 @@ import (
 	"github.com/Morpa/go-rag/vector"
 )
 
+// Default chunking parameters. Both numbers are bytes.
+//
+//	ChunkSize=1000     A sweet spot for prose: large enough to carry a
+//	                   self-contained idea (a paragraph or two), small
+//	                   enough that the embedding doesn't average too
+//	                   many distinct topics into one vector.
+//	ChunkOverlap=100   The first 100 bytes of chunk N+1 repeat the last
+//	                   100 bytes of chunk N. Overlap matters when an
+//	                   important sentence happens to straddle a chunk
+//	                   boundary — without overlap, the model would see
+//	                   half of it on each side and might miss the
+//	                   point. With overlap, the full sentence appears
+//	                   intact in at least one chunk.
 const (
 	defaultChunkSize    = 1000
 	defaultChunkOverlap = 100
 )
 
+// Options configures an ingest run.
 type Options struct {
-	SourceDir    string
+	// SourceDir is watched for new files (non-recursively).
+	SourceDir string
+
+	// ProcessedDir receives originals after a successful upsert. It
+	// must differ from SourceDir; otherwise moved files would be
+	// re-detected and re-ingested in a loop.
 	ProcessedDir string
+
+	// ChunkSize and ChunkOverlap control text splitting (in bytes).
+	// Sensible defaults are applied when zero.
 	ChunkSize    int
 	ChunkOverlap int
 }
 
+// processOne runs the per-file pipeline: read the file,
+// then hand the bytes off to processContent which does the actual
+// chunk → embed → upsert work.
 func processOne(ctx context.Context, path string, opts Options, embedder llm.Embedder, store vector.Store) error {
 	if !supportedFormat(path) {
 		return fmt.Errorf("unsupported format: %s", filepath.Ext(path))
@@ -69,6 +94,19 @@ func processOne(ctx context.Context, path string, opts Options, embedder llm.Emb
 	return err
 }
 
+// processContent ingests an in-memory document under the
+// given source name and returns the number of chunks produced. The
+// source name is used as the chunk-id prefix and the "source" metadata
+// field; only its basename is significant.
+//
+// Stable ID scheme: "<basename>#<chunk-index>". The delete-then-upsert
+// flow ensures re-ingesting an edited file leaves no orphaned chunks
+// even when the new content produces fewer chunks than the old.
+//
+// Note: delete and upsert are NOT in a single transaction. There is a
+// brief window where the file has zero chunks in the store; a
+// retrieval that lands in that window will simply return fewer hits.
+// For a course-pace pipeline this is invisible.
 func processContent(ctx context.Context, source string, content []byte, opts Options, embedder llm.Embedder, store vector.Store) (int, error) {
 	if embedder == nil {
 		return 0, errors.New("embedder is required")
@@ -139,6 +177,10 @@ func processContent(ctx context.Context, source string, content []byte, opts Opt
 	return len(chunks), nil
 }
 
+// supportedFormat reports whether path's extension is one
+// this package knows how to read. Plain text and Markdown are treated
+// identically; PDF and others can be added with format-specific
+// readers later.
 func supportedFormat(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".txt", ".md", ".markdown":
