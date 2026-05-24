@@ -27,6 +27,7 @@ import (
 	"github.com/Morpa/go-rag/rag"
 	"github.com/Morpa/go-rag/vector"
 	"github.com/Morpa/go-rag/vector/pgvector"
+	"github.com/Morpa/go-rag/web"
 )
 
 // Run is the program's main loop. In lesson 1 there is only the
@@ -86,6 +87,28 @@ func Run(parent context.Context, cfg config.Config) error {
 			TopK:     5,
 			Rewriter: rag.NewRewriter(client),
 		})
+	}
+
+	if cfg.HTTPAddr != "" {
+		srv, err := web.New(client, embedder, retriever, web.Options{
+			Addr:             cfg.HTTPAddr,
+			SystemPromptFile: cfg.SystemPromptFile,
+			Store:            store,
+			ProcessedDir:     cfg.ProcessedDir,
+			ImagesDir:        cfg.ImageDir,
+		})
+
+		if err != nil {
+			logger.Printf("web server disabled: %v", err)
+		} else {
+			wg.Go(func() {
+				if err := srv.Run(ctx, cfg.HTTPAddr); err != nil && ctx.Err() == nil {
+					logger.Printf("web server stopped: %v", err)
+				}
+			})
+			logger.Printf("web chat at http://localhost%s/chat", cfg.HTTPAddr)
+		}
+
 	}
 
 	replErr := chat.RunREPL(ctx, client, retriever, chat.Options{
