@@ -86,8 +86,156 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/chat", s.handleChatPage)
 	r.Post("/api/chat/stream", s.handleChatStream)
 	r.Post("/api/upload", s.handleUpload)
+	if s.imagesDir != "" {
+		r.Post("/api/upload/image", s.handleUploadImage)
+		fs := http.FileServer(http.Dir(s.imagesDir))
+		r.Handle("/images/*", http.StripPrefix("/images", fs))
+	}
+	if s.client.HasVision() {
+		r.Post("/api/caption", s.handleCaption)
+	}
 
 	return r
+}
+
+type captionResponse struct {
+	Description string `json:"description"`
+}
+
+func (s *Server) handleCaption(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
+		http.Error(w, "upload too large or malformed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("image")
+	if err != nil {
+		http.Error(w, "missing image field", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	if !ingest.IsImage(filepath.Base(header.Filename)) {
+		http.Error(w, "unsupported image type", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	content, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "read upload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	mime := header.Header.Get("Content-Type")
+	desc, err := s.client.DescribeImage(r.Context(), mime, content)
+	if err != nil {
+		log.Printf("[web] caption failed for %q: %v", header.Filename, err)
+		http.Error(w, "caption failed", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(captionResponse{Description: strings.TrimSpace(desc)})
+}
+
+type uploadImageResponse struct {
+	Source      string `json:"source"`
+	ImagePath   string `json:"image_path"`
+	Description string `json:"description"`
+	Bytes       int    `json:"bytes"`
+	Chunks      int    `json:"chunks"`
+}
+
+func (s *Server) handleUploadImage(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		http.Error(w, "ingest is not configured (no vector store)", http.StatusServiceUnavailable)
+		return
+	}
+
+	if s.imagesDir == "" {
+		http.Error(w, "image upload is not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
+		http.Error(w, "upload too large or malformed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	description := strings.TrimSpace(r.FormValue("description"))
+	if description == "" {
+		http.Error(w, "description is required", http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("image")
+	if err != nil {
+		http.Error(w, "missing 'image' field", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	original := filepath.Base(header.Filename)
+	if !ingest.IsImage(original) {
+		http.Error(w, "unsupported image format (allowed: .jpg, .jpeg, .png, .gif, .webp)", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	content, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "read upload: "+err.Error(), http.StatusBadRequest)
+	}
+
+	saved := fmt.Sprintf("%d-%s", time.Now().UnixNano(), saveFileName(original))
+
+	if err := os.MkdirAll(s.imagesDir, 0o755); err != nil {
+		http.Error(w, "mkdir images dir: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	dest := filepath.Join(s.imagesDir, saved)
+	if err := os.WriteFile(dest, content, 0o644); err != nil {
+		http.Error(w, "write image: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	chunks, err := ingest.ProcessImage(r.Context(), saved, description, ingest.Options{}, s.embedder, s.store)
+	if err != nil {
+		_ = os.Remove(dest)
+		log.Printf("[web] image ingest failed for %q; %v", saved, err)
+		http.Error(w, "ingest failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(uploadImageResponse{
+		Source:      saved,
+		ImagePath:   ingest.ImagePathPrefix + saved,
+		Description: description,
+		Bytes:       len(content),
+		Chunks:      chunks,
+	})
+}
+
+func saveFileName(name string) string {
+	var sb strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '.', r == '-', r == '_':
+			sb.WriteRune(r)
+		default:
+			sb.WriteRune('_')
+		}
+	}
+	out := sb.String()
+	if out == "" || out == "." || out == ".." {
+		return "image"
+	}
+	return out
 }
 
 type chatRequest struct {
@@ -128,7 +276,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	chuncks, err := ingest.ProcessContent(r.Context(), name, content, ingest.Options{}, s.embedder, s.store)
 	if err != nil {
-		log.Printf("[web] upload ingest failed for %q: %w", name, err)
+		log.Printf("[web] upload ingest failed for %q: %v", name, err)
 		http.Error(w, "ingest failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -136,9 +284,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if s.processedDir != "" {
 		dest := filepath.Join(s.processedDir, name)
 		if err := os.MkdirAll(s.processedDir, 0o755); err != nil {
-			log.Printf("[web] mkdir %s: %w", s.processedDir, err)
+			log.Printf("[web] mkdir %s: %v", s.processedDir, err)
 		} else if err := os.WriteFile(dest, content, 0o644); err != nil {
-			log.Printf("[web] archive %s: %w", dest, err)
+			log.Printf("[web] archive %s: %v", dest, err)
 		}
 	}
 
@@ -234,8 +382,8 @@ func withInlineContext(history []llm.Message, contextText string) []llm.Message 
 func (s *Server) handleChatPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tpl.ExecuteTemplate(w, "chat.gohtml", map[string]any{
-		"Title": s.title,
-		// "CaptionEnabled": s.client.HasVision(),
+		"Title":          s.title,
+		"CaptionEnabled": s.client.HasVision(),
 	}); err != nil {
 		log.Printf("[web] template error:  %v", err)
 	}
